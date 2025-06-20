@@ -1,0 +1,449 @@
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox, simpledialog
+import os
+import tempfile
+import subprocess
+import platform
+import threading
+import webbrowser
+from PIL import Image, ImageDraw, ImageTk
+import fitz  # PyMuPDF
+
+class PDFPrinterApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Bulk PDF Duplex Printer")
+        self.root.geometry("800x600")
+        self.root.resizable(True, True)
+        self.files = []
+        self.processing = False
+        self.sumatra_path = self.find_sumatra()
+        
+        # Create a themed style
+        self.style = ttk.Style()
+        self.style.theme_use('clam')
+        self.style.configure('TFrame', background='#f0f0f0')
+        self.style.configure('TLabel', background='#f0f0f0', font=('Arial', 10))
+        self.style.configure('TButton', font=('Arial', 10))
+        self.style.configure('Header.TLabel', font=('Arial', 14, 'bold'), foreground='#2c3e50')
+        self.style.configure('Accent.TButton', foreground='white', background='#3498db', font=('Arial', 10, 'bold'))
+        self.style.map('Accent.TButton', background=[('active', '#2980b9')])
+        self.style.configure('Red.TButton', foreground='white', background='#e74c3c')
+        self.style.map('Red.TButton', background=[('active', '#c0392b')])
+        
+        # Create UI elements
+        self.create_widgets()
+        
+        # Check platform compatibility
+        self.check_platform_compatibility()
+        
+    def create_widgets(self):
+        # Main frame
+        main_frame = ttk.Frame(self.root, padding=15)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Header
+        header_frame = ttk.Frame(main_frame)
+        header_frame.pack(fill=tk.X, pady=(0, 15))
+        
+        ttk.Label(header_frame, text="Bulk PDF Duplex Printer", style='Header.TLabel').pack(side=tk.LEFT)
+        
+        # Logo
+        try:
+            logo = self.create_logo()
+            logo_label = ttk.Label(header_frame, image=logo)
+            logo_label.image = logo  # Keep reference
+            logo_label.pack(side=tk.RIGHT, padx=10)
+        except:
+            pass  # Skip logo if there's an issue
+        
+        # Instructions
+        ttk.Label(main_frame, text="Upload multiple PDF files, then print them all in duplex mode with one click", 
+                  wraplength=600).pack(fill=tk.X, pady=(0, 15))
+        
+        # File list frame
+        list_frame = ttk.LabelFrame(main_frame, text="Selected PDF Files", padding=10)
+        list_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 15))
+        
+        # Listbox with scrollbar
+        self.listbox = tk.Listbox(list_frame, selectmode=tk.EXTENDED, height=10, 
+                                 bg='white', relief=tk.FLAT, font=('Arial', 10))
+        self.listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 5))
+        
+        scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.listbox.yview)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.listbox.config(yscrollcommand=scrollbar.set)
+        
+        # Button frame
+        btn_frame = ttk.Frame(main_frame)
+        btn_frame.pack(fill=tk.X, pady=(0, 15))
+        
+        # Action buttons
+        ttk.Button(btn_frame, text="Add PDFs", command=self.add_files, width=15).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Remove Selected", command=self.remove_files, width=15).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Clear All", command=self.clear_files, style='Red.TButton', width=15).pack(side=tk.LEFT, padx=5)
+        
+        # Print button on the right
+        self.print_btn = ttk.Button(btn_frame, text="Print in Duplex", command=self.initiate_print, 
+                                  style='Accent.TButton', width=15, state=tk.DISABLED)
+        self.print_btn.pack(side=tk.RIGHT, padx=5)
+        
+        # Printer settings frame
+        settings_frame = ttk.LabelFrame(main_frame, text="Printer Settings", padding=10)
+        settings_frame.pack(fill=tk.X, pady=(0, 15))
+        
+        # SumatraPDF status
+        self.sumatra_status = ttk.Label(settings_frame, text="SumatraPDF: Not configured", font=('Arial', 9))
+        self.sumatra_status.pack(anchor=tk.W, fill=tk.X, pady=(0, 5))
+        
+        # SumatraPDF buttons
+        sumatra_btn_frame = ttk.Frame(settings_frame)
+        sumatra_btn_frame.pack(fill=tk.X)
+        
+        ttk.Button(sumatra_btn_frame, text="Auto-Detect SumatraPDF", 
+                  command=self.auto_detect_sumatra, width=20).pack(side=tk.LEFT, padx=5)
+        ttk.Button(sumatra_btn_frame, text="Set SumatraPDF Path", 
+                  command=self.set_sumatra_path, width=20).pack(side=tk.LEFT, padx=5)
+        ttk.Button(sumatra_btn_frame, text="Download SumatraPDF", 
+                  command=self.download_sumatra, width=20).pack(side=tk.RIGHT, padx=5)
+        
+        # Status frame
+        status_frame = ttk.Frame(main_frame)
+        status_frame.pack(fill=tk.X)
+        
+        # Progress bar
+        self.progress = ttk.Progressbar(status_frame, mode='determinate', length=600)
+        self.progress.pack(fill=tk.X, pady=(5, 0))
+        
+        # Status label
+        self.status = ttk.Label(status_frame, text="Ready to upload PDF files", font=('Arial', 9))
+        self.status.pack(fill=tk.X, pady=(5, 0))
+        
+        # Footer
+        footer_frame = ttk.Frame(main_frame)
+        footer_frame.pack(fill=tk.X, pady=(10, 0))
+        
+        ttk.Label(footer_frame, text=f"Platform: {platform.system()} {platform.release()} | Printer: {self.get_default_printer()}", 
+                  font=('Arial', 8), foreground='#7f8c8d').pack(side=tk.LEFT)
+        
+        # Configure grid weights
+        main_frame.columnconfigure(0, weight=1)
+        
+        # Update Sumatra status
+        self.update_sumatra_status()
+        
+    def create_logo(self):
+        # Create a simple printer logo using Pillow
+        img = Image.new('RGB', (48, 48), '#f0f0f0')
+        draw = ImageDraw.Draw(img)
+        
+        # Draw printer body
+        draw.rectangle([10, 10, 38, 38], outline='#3498db', width=2)
+        
+        # Draw paper tray
+        draw.rectangle([14, 30, 34, 34], fill='#3498db')
+        
+        # Draw output paper
+        draw.rectangle([12, 16, 36, 26], fill='#ecf0f1')
+        
+        # Draw printer top
+        draw.rectangle([5, 5, 43, 10], fill='#3498db')
+        
+        return ImageTk.PhotoImage(img)
+    
+    def find_sumatra(self):
+        """Search for SumatraPDF in common installation locations"""
+        paths = [
+            # Common installation paths
+            r"C:\Program Files\SumatraPDF\SumatraPDF.exe",
+            r"C:\Program Files (x86)\SumatraPDF\SumatraPDF.exe",
+            
+            # User-specific installation paths
+            os.path.expandvars(r"%LOCALAPPDATA%\SumatraPDF\SumatraPDF.exe"),
+            os.path.expandvars(r"%USERPROFILE%\AppData\Local\SumatraPDF\SumatraPDF.exe"),
+            
+            # Path provided in error message
+            r"C:\Users\91725\AppData\Local\SumatraPDF\SumatraPDF.exe",
+            
+            # Portable version path
+            os.path.join(os.getcwd(), "SumatraPDF", "SumatraPDF.exe")
+        ]
+        
+        for path in paths:
+            if os.path.exists(path):
+                return path
+        return None
+    
+    def update_sumatra_status(self):
+        """Update the SumatraPDF status display"""
+        if self.sumatra_path and os.path.exists(self.sumatra_path):
+            status = f"SumatraPDF: Found at {self.sumatra_path}"
+            self.sumatra_status.config(text=status, foreground="green")
+        else:
+            status = "SumatraPDF: Not found (required for duplex printing on Windows)"
+            self.sumatra_status.config(text=status, foreground="red")
+    
+    def auto_detect_sumatra(self):
+        """Try to automatically find SumatraPDF"""
+        self.sumatra_path = self.find_sumatra()
+        self.update_sumatra_status()
+        
+        if self.sumatra_path:
+            messagebox.showinfo("Auto-Detect", f"Found SumatraPDF at:\n{self.sumatra_path}")
+        else:
+            messagebox.showwarning("Auto-Detect", 
+                                  "SumatraPDF not found in common locations.\n"
+                                  "Please set the path manually or download it.")
+    
+    def set_sumatra_path(self):
+        """Let the user manually specify the SumatraPDF path"""
+        initial_dir = os.path.dirname(self.sumatra_path) if self.sumatra_path else "C:\\"
+        path = filedialog.askopenfilename(
+            title="Select SumatraPDF.exe",
+            filetypes=[("Executable files", "*.exe"), ("All files", "*.*")],
+            initialdir=initial_dir
+        )
+        
+        if path:
+            if "SumatraPDF" in path:
+                self.sumatra_path = path
+                self.update_sumatra_status()
+                messagebox.showinfo("Path Set", f"SumatraPDF path set to:\n{path}")
+            else:
+                messagebox.showwarning("Invalid Path", 
+                                      "The selected file doesn't appear to be SumatraPDF.\n"
+                                      "Please select the correct executable.")
+    
+    def download_sumatra(self):
+        """Open browser to download SumatraPDF"""
+        webbrowser.open("https://www.sumatrapdfreader.org/free-pdf-reader.html")
+        messagebox.showinfo("Download SumatraPDF", 
+                           "Please download and install SumatraPDF,\n"
+                           "then use the 'Set SumatraPDF Path' button.")
+    
+    def check_platform_compatibility(self):
+        system = platform.system()
+        if system == "Windows":
+            if not self.sumatra_path:
+                self.status.config(text="Warning: SumatraPDF not found. Required for duplex printing on Windows")
+        elif system not in ["Darwin", "Linux"]:
+            messagebox.showwarning("Unsupported Platform", 
+                                  "Your operating system might not be fully supported. Printing may not work as expected.")
+    
+    def get_default_printer(self):
+        try:
+            if platform.system() == "Windows":
+                try:
+                    import win32print
+                    return win32print.GetDefaultPrinter()
+                except ImportError:
+                    return "System Default (win32print not available)"
+            elif platform.system() == "Darwin":  # macOS
+                return subprocess.check_output(["lpstat", "-d"]).decode().split(":")[1].strip()
+            elif platform.system() == "Linux":
+                return subprocess.check_output(["lpstat", "-d"]).decode().split(":")[1].strip()
+            return "System Default"
+        except:
+            return "Unknown Printer"
+        
+    def add_files(self):
+        if self.processing:
+            return
+            
+        files = filedialog.askopenfilenames(
+            filetypes=[("PDF Files", "*.pdf"), ("All Files", "*.*")],
+            title="Select PDF Files"
+        )
+        if files:
+            new_files = [f for f in files if f not in self.files]
+            self.files.extend(new_files)
+            self.update_listbox()
+            
+            # Enable print button if we have files
+            self.print_btn.config(state=tk.NORMAL if self.files else tk.DISABLED)
+            
+    def remove_files(self):
+        if self.processing:
+            return
+            
+        selected = self.listbox.curselection()
+        for index in sorted(selected, reverse=True):
+            self.files.pop(index)
+        self.update_listbox()
+        
+        # Disable print button if no files left
+        self.print_btn.config(state=tk.NORMAL if self.files else tk.DISABLED)
+        
+    def clear_files(self):
+        if self.processing:
+            return
+            
+        self.files = []
+        self.update_listbox()
+        self.print_btn.config(state=tk.DISABLED)
+        
+    def update_listbox(self):
+        self.listbox.delete(0, tk.END)
+        for file in self.files:
+            filename = os.path.basename(file)
+            filesize = os.path.getsize(file) / (1024 * 1024)  # in MB
+            self.listbox.insert(tk.END, f"{filename} ({filesize:.2f} MB)")
+        self.status.config(text=f"{len(self.files)} PDF file(s) selected - Total: {self.calculate_total_size():.2f} MB")
+        
+    def calculate_total_size(self):
+        total = 0
+        for file in self.files:
+            total += os.path.getsize(file) / (1024 * 1024)  # in MB
+        return total
+        
+    def initiate_print(self):
+        if self.processing or not self.files:
+            return
+            
+        # Confirm with user
+        if not messagebox.askyesno("Confirm Print", 
+                                 f"Print {len(self.files)} PDF files in duplex mode?\nTotal pages: {self.estimate_total_pages()}",
+                                 icon='question', parent=self.root):
+            return
+            
+        # Start printing in a separate thread to keep UI responsive
+        self.processing = True
+        self.status.config(text="Processing files...")
+        self.progress['value'] = 0
+        self.root.update()
+        
+        threading.Thread(target=self.print_files, daemon=True).start()
+        
+    def estimate_total_pages(self):
+        total_pages = 0
+        for file in self.files:
+            try:
+                with fitz.open(file) as doc:
+                    total_pages += len(doc)
+            except:
+                # Skip problematic files
+                pass
+        return total_pages
+        
+    def merge_pdfs(self):
+        # Create a temporary file for merging
+        temp_file = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False).name
+        
+        # Create a new PDF document
+        merged_doc = fitz.open()
+        
+        # Process each file with progress update
+        for i, file in enumerate(self.files):
+            try:
+                # Update progress
+                progress = (i + 1) / len(self.files) * 50  # First half of progress
+                self.progress['value'] = progress
+                self.status.config(text=f"Merging: {os.path.basename(file)}")
+                self.root.update()
+                
+                # Open and append the PDF
+                doc = fitz.open(file)
+                merged_doc.insert_pdf(doc)
+                doc.close()
+            except Exception as e:
+                # Skip problematic files but log the error
+                self.status.config(text=f"Error processing {os.path.basename(file)}: {str(e)}")
+                continue
+                
+        # Save the merged document
+        if len(merged_doc) > 0:
+            merged_doc.save(temp_file)
+            merged_doc.close()
+            return temp_file
+        return None
+        
+    def print_pdf(self, file_path):
+        try:
+            system = platform.system()
+            self.status.config(text="Sending print job...")
+            self.progress['value'] = 75
+            self.root.update()
+            
+            if system == "Windows":
+                if self.sumatra_path and os.path.exists(self.sumatra_path):
+                    # Use SumatraPDF for duplex printing
+                    try:
+                        subprocess.run([
+                            self.sumatra_path,
+                            "-print-to-default",
+                            "-print-settings", "duplex",
+                            file_path
+                        ], check=True)
+                        return True
+                    except subprocess.CalledProcessError as e:
+                        self.status.config(text=f"SumatraPDF error: {str(e)}")
+                        return False
+                else:
+                    # Fallback to system printing without duplex
+                    self.status.config(text="Warning: Printing without duplex (SumatraPDF not found)")
+                    os.startfile(file_path, "print")
+                    return True
+                
+            elif system == "Darwin":  # macOS
+                subprocess.run([
+                    "lp",
+                    "-o", "duplex=DuplexNoTumble",
+                    file_path
+                ], check=True)
+                return True
+                
+            elif system == "Linux":
+                subprocess.run([
+                    "lp",
+                    "-o", "sides=two-sided-long-edge",
+                    file_path
+                ], check=True)
+                return True
+                
+            else:
+                raise OSError("Unsupported operating system")
+                
+        except (subprocess.CalledProcessError, FileNotFoundError, OSError) as e:
+            self.status.config(text=f"Print error: {str(e)}")
+            return False
+            
+    def print_files(self):
+        try:
+            # Step 1: Merge PDFs
+            merged_file = self.merge_pdfs()
+            
+            if not merged_file:
+                messagebox.showerror("Print Error", "No valid PDF pages to print")
+                self.processing = False
+                self.status.config(text="Ready")
+                self.progress['value'] = 0
+                return
+                
+            # Step 2: Print the merged PDF
+            self.status.config(text="Printing merged document...")
+            self.progress['value'] = 90
+            self.root.update()
+            
+            if self.print_pdf(merged_file):
+                self.status.config(text="Print job submitted successfully!")
+                self.progress['value'] = 100
+            else:
+                messagebox.showerror("Print Error", "Failed to submit print job")
+                self.status.config(text="Printing failed")
+                self.progress['value'] = 0
+                
+            # Clean up temporary file
+            if os.path.exists(merged_file):
+                os.unlink(merged_file)
+                
+        except Exception as e:
+            messagebox.showerror("Error", f"An unexpected error occurred: {str(e)}")
+            self.status.config(text="Error occurred")
+            self.progress['value'] = 0
+        finally:
+            self.processing = False
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = PDFPrinterApp(root)
+    root.mainloop()
